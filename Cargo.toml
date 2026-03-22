@@ -12,3 +12,7 @@ edition = "2021"
 
 [dependencies]
 bitreader = "0.3"
+
+[dev-dependencies]
+rand = "0.8"
+

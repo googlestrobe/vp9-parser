@@ -1170,21 +1170,35 @@ impl Vp9Parser {
         }
 
         if self.frame_type == FrameType::KeyFrame || self.error_resilient_mode || self.intra_only {
-            // Reset the loop filter deltas.
+            // setup_past_independence() resets
+            for i in 0..MAX_SEGMENTS {
+                for j in 0..4 {
+                    self.segment_feature_enabled[i][j] = false;
+                    self.segment_feature_data[i][j] = 0;
+                }
+            }
+            self.segmentation_abs_or_delta_update = false;
+            self.loop_filter_delta_enabled = true;
+
             self.loop_filter_ref_deltas[INTRA_FRAME] = 1;
             self.loop_filter_ref_deltas[LAST_FRAME] = 0;
             self.loop_filter_ref_deltas[GOLDEN_FRAME] = -1;
             self.loop_filter_ref_deltas[ALTREF_FRAME] = -1;
             self.loop_filter_mode_deltas[0] = 0;
             self.loop_filter_mode_deltas[1] = 0;
-        }
-        self.loop_filter_params(&mut br)?;
 
+            for i in 0..4 {
+                self.ref_frame_sign_bias[i] = false;
+            }
+        }
+
+        self.loop_filter_params(&mut br)?;
         self.quantization_params(&mut br)?;
         self.segmentation_params(&mut br)?;
         self.tile_info(&mut br)?;
 
         let compressed_header_size: usize = (br.read_u16(16)?).into();
+
         self.trailing_bits(&mut br)?;
         let uncompressed_header_size: usize = (br.position() / 8).try_into()?;
 
@@ -1427,7 +1441,8 @@ impl Vp9Parser {
                     };
                     self.segment_feature_enabled[i][SEG_LVL_REF_FRAME] = br.read_bool()?;
                     if self.segment_feature_enabled[i][SEG_LVL_REF_FRAME] {
-                        self.segment_feature_data[i][SEG_LVL_REF_FRAME] = br.read_inverse_i16(2)?;
+                        self.segment_feature_data[i][SEG_LVL_REF_FRAME] =
+                            (br.read_u16(2)?).try_into()?;
                     };
                     self.segment_feature_enabled[i][SEG_LVL_SKIP] = br.read_bool()?;
                     self.segment_feature_data[i][SEG_LVL_SKIP] = 0;
@@ -1471,8 +1486,8 @@ impl Vp9Parser {
 
     fn calc_min_log2_tile_cols(&self) -> Result<u8> {
         let mut min_log2 = 0;
-        let sb64_cols: u8 = ((self.mi_cols + 7) >> 3).try_into()?;
-        while (MAX_TILE_WIDTH_B64 << min_log2) < sb64_cols {
+        let sb64_cols = (self.mi_cols + 7) >> 3;
+        while (u16::from(MAX_TILE_WIDTH_B64) << min_log2) < sb64_cols {
             min_log2 += 1;
         }
         Ok(min_log2)
@@ -1480,8 +1495,8 @@ impl Vp9Parser {
 
     fn calc_max_log2_tile_cols(&self) -> Result<u8> {
         let mut max_log2 = 1;
-        let sb64_cols: u8 = ((self.mi_cols + 7) >> 3).try_into()?;
-        while (sb64_cols >> max_log2) >= MIN_TILE_WIDTH_B64 {
+        let sb64_cols = (self.mi_cols + 7) >> 3;
+        while (sb64_cols >> max_log2) >= u16::from(MIN_TILE_WIDTH_B64) {
             max_log2 += 1;
         }
         Ok(max_log2 - 1)
@@ -1489,7 +1504,7 @@ impl Vp9Parser {
 
     // Aligns the reader to the next byte offset.
     fn trailing_bits(&self, br: &mut BitReader) -> Result<()> {
-        while br.is_aligned(1) {
+        while !br.is_aligned(1) {
             let zero_bit = br.read_bool()?;
             if zero_bit {
                 return Err(Vp9ParserError::InvalidPadding);
@@ -1511,7 +1526,8 @@ impl<'a> SignedRead for BitReader<'a> {
         debug_assert!(bits < 8);
 
         let value: i8 = self.read_u8(bits)?.try_into()?;
-        if self.read_bool()? {
+        let sign = self.read_bool()?;
+        if sign {
             Ok(-(value))
         } else {
             Ok(value)
@@ -1522,7 +1538,8 @@ impl<'a> SignedRead for BitReader<'a> {
         debug_assert!(bits < 16);
 
         let value: i16 = self.read_u16(bits)?.try_into()?;
-        if self.read_bool()? {
+        let sign = self.read_bool()?;
+        if sign {
             Ok(-(value))
         } else {
             Ok(value)
